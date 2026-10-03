@@ -2,12 +2,8 @@ import asyncio
 import hashlib
 import json
 import uuid
-import zipfile
 from dataclasses import dataclass
-from pathlib import Path
-from urllib.request import urlopen
 
-from openfreebuds.constants import STORAGE_PATH
 from openfreebuds.driver.huawei.constants import (
     CMD_FEATURE_ABILITY,
     CMD_FEATURE_SWITCH,
@@ -21,30 +17,20 @@ from openfreebuds.driver.huawei.constants import (
 )
 from openfreebuds.driver.huawei.driver.generic import OfbDriverHandlerHuawei
 from openfreebuds.driver.huawei.package import HuaweiSppPackage
+from openfreebuds.driver.huawei.prompt_tone_resource import (
+    PROMPT_TONE_BY_ID,
+    PROMPT_TONE_SUCCESS,
+    PROMPT_TONES,
+    HuaweiPromptTone,
+    HuaweiPromptToneResourceCache,
+    PromptToneTransferError,
+)
 from openfreebuds.driver.huawei.utils import crc16_xmodem
 from openfreebuds.utils.logger import create_logger
 
 log = create_logger("OfbHuaweiPromptToneHandler")
 
 BOX_TONE_FEATURE_ID = 16
-PROMPT_TONE_SUCCESS = 100000
-PROMPT_TONE_CDN_ROOT = (
-    "https://contentcenter-drru.dbankcdn.ru/pub_1/"
-    "HW-SmartHome_oem_900_9/43/v3/ru/device/guide/00000A"
-)
-PROMPT_TONE_CONFIG_URL = f"{PROMPT_TONE_CDN_ROOT}/00000A_promptToneConfig.zip"
-PROMPT_TONE_ARCHIVE_URL = f"{PROMPT_TONE_CDN_ROOT}/00000A_promptTone.zip"
-
-# These archives are fetched over the network and their PCM payload is written
-# straight into the headset over OTA, so a tampered or truncated download would
-# be flashed onto the device. Both digests were taken from the Huawei CDN and
-# are enforced before anything is extracted; a mismatch fails closed.
-PROMPT_TONE_CONFIG_SHA256 = "6f9e998a48a37bf16952fd73e2e4cbb4cb0a6810bf54a7700a4c89694cd5337f"
-PROMPT_TONE_ARCHIVE_SHA256 = "fda388b48339abf10dc201246e450ae0973cfb7e0625a23210676b121285376c"
-
-# Both archives are well under a megabyte. The cap stops a hostile or broken
-# endpoint from filling the disk before the digest can be checked.
-PROMPT_TONE_MAX_DOWNLOAD_SIZE = 8 * 1024 * 1024
 PROMPT_TONE_OTA_HEADSET_BOXES_LOW_BATTERY = 109002
 PROMPT_TONE_OTA_HEADSET_OTA_STATE = 109006
 PROMPT_TONE_OTA_HEADSET_OUT_BOX = 109012
@@ -60,53 +46,6 @@ PROMPT_TONE_ERROR_MESSAGES = {
 }
 
 
-class PromptToneTransferError(RuntimeError):
-    def __init__(self, message: str, code: int | None = None):
-        super().__init__(message)
-        self.code = code
-
-
-class PromptToneResourceError(PromptToneTransferError):
-    """
-    Raised when the downloaded prompt-tone resources can't be trusted.
-    Subclasses PromptToneTransferError so the existing transfer error
-    reporting path surfaces it to the UI instead of crashing the handler.
-    """
-
-
-@dataclass(frozen=True)
-class HuaweiPromptTone:
-    tone_id: int
-    name: str
-
-    @property
-    def file_name(self) -> str:
-        return f"{self.name}.pcm"
-
-
-PROMPT_TONES = [
-    HuaweiPromptTone(0, "Unfold"),
-    HuaweiPromptTone(43, "Whistle"),
-    HuaweiPromptTone(4, "Bongo"),
-    HuaweiPromptTone(7, "Chess"),
-    HuaweiPromptTone(10, "Dewdrop"),
-    HuaweiPromptTone(11, "Doorbell"),
-    HuaweiPromptTone(12, "Drip"),
-    HuaweiPromptTone(15, "Fountain"),
-    HuaweiPromptTone(18, "Huawei_Cascade"),
-    HuaweiPromptTone(22, "Leap"),
-    HuaweiPromptTone(25, "Lit"),
-    HuaweiPromptTone(26, "Little_Wish"),
-    HuaweiPromptTone(28, "Meditation"),
-    HuaweiPromptTone(31, "Pixies"),
-    HuaweiPromptTone(32, "Play"),
-    HuaweiPromptTone(34, "Pursue"),
-    HuaweiPromptTone(35, "Rise"),
-    HuaweiPromptTone(36, "Shine"),
-]
-PROMPT_TONE_BY_ID = {tone.tone_id: tone for tone in PROMPT_TONES}
-
-
 @dataclass
 class HuaweiPromptToneState:
     supported: bool = False
@@ -117,99 +56,6 @@ class HuaweiPromptToneState:
     tone_device_id: str = "000000000000"
     tone_id: int = 0
     select: int = 0
-
-
-class HuaweiPromptToneResourceCache:
-    def __init__(self, root: Path | None = None):
-        self.root = root or STORAGE_PATH / "huawei_prompt_tones" / "00000A"
-        self.config_zip_path = self.root / "00000A_promptToneConfig.zip"
-        self.archive_zip_path = self.root / "00000A_promptTone.zip"
-        self.config_path = self.root / "tone_config.json"
-        self.pcm_root = self.root / "pcm"
-
-    def prepare(self):
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.pcm_root.mkdir(parents=True, exist_ok=True)
-        self._ensure_zip(PROMPT_TONE_CONFIG_URL, self.config_zip_path, PROMPT_TONE_CONFIG_SHA256)
-        self._ensure_zip(PROMPT_TONE_ARCHIVE_URL, self.archive_zip_path, PROMPT_TONE_ARCHIVE_SHA256)
-        self._extract_config()
-        self._extract_pcm_files()
-
-    def ensure_pcm(self, tone: HuaweiPromptTone) -> Path:
-        path = self.pcm_root / tone.file_name
-        if not path.is_file():
-            self.prepare()
-        if not path.is_file():
-            raise FileNotFoundError(f"Prompt tone PCM not found in Huawei resource cache: {tone.file_name}")
-        return path
-
-    def _ensure_zip(self, url: str, path: Path, expected_sha256: str):
-        if path.is_file() and self._file_sha256(path) == expected_sha256:
-            return
-
-        if path.is_file():
-            # A cached copy that no longer matches is either corrupted or stale.
-            # Drop it and re-fetch rather than extracting something unverified.
-            log.warning("Cached prompt tone archive %s failed verification, re-downloading", path.name)
-            path.unlink()
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        digest = hashlib.sha256()
-        downloaded = 0
-
-        try:
-            with urlopen(url, timeout=60) as response, open(tmp_path, "wb") as file:
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    downloaded += len(chunk)
-                    if downloaded > PROMPT_TONE_MAX_DOWNLOAD_SIZE:
-                        raise PromptToneResourceError(
-                            f"Prompt tone archive {path.name} exceeds the {PROMPT_TONE_MAX_DOWNLOAD_SIZE} byte limit"
-                        )
-                    digest.update(chunk)
-                    file.write(chunk)
-
-            actual = digest.hexdigest()
-            if actual != expected_sha256:
-                raise PromptToneResourceError(
-                    f"Prompt tone archive {path.name} failed integrity check "
-                    f"(expected {expected_sha256}, got {actual})"
-                )
-
-            tmp_path.replace(path)
-        except BaseException:
-            tmp_path.unlink(missing_ok=True)
-            raise
-
-    @staticmethod
-    def _file_sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with open(path, "rb") as file:
-            for chunk in iter(lambda: file.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-
-    def _extract_config(self):
-        if self.config_path.is_file():
-            return
-        with zipfile.ZipFile(self.config_zip_path) as archive:
-            entry = next(name for name in archive.namelist() if name.endswith("tone_config.json"))
-            self.config_path.write_bytes(archive.read(entry))
-
-    def _extract_pcm_files(self):
-        missing = [tone for tone in PROMPT_TONES if not (self.pcm_root / tone.file_name).is_file()]
-        if not missing:
-            return
-        with zipfile.ZipFile(self.archive_zip_path) as archive:
-            for entry in archive.namelist():
-                if not entry.lower().endswith(".pcm"):
-                    continue
-                target = self.pcm_root / Path(entry).name
-                if not target.is_file():
-                    target.write_bytes(archive.read(entry))
 
 
 class OfbHuaweiPromptToneHandler(OfbDriverHandlerHuawei):
@@ -313,7 +159,7 @@ class OfbHuaweiPromptToneHandler(OfbDriverHandlerHuawei):
             extend_group=True,
         )
         try:
-            await asyncio.to_thread(self.cache.prepare)
+            await self.cache.prepare()
         except PromptToneTransferError as error:
             # Integrity failure or an oversized download. Never fall through to
             # extraction: report it and leave the cache empty.
@@ -463,7 +309,7 @@ class OfbHuaweiPromptToneHandler(OfbDriverHandlerHuawei):
                 {"transfer_status": "downloading", "transfer_progress": "0", "transfer_error": ""},
                 extend_group=True,
             )
-            pcm_path = await asyncio.to_thread(self.cache.ensure_pcm, tone)
+            pcm_path = await self.cache.ensure_pcm(tone)
             pcm_data = await asyncio.to_thread(pcm_path.read_bytes)
             await self.driver.put_property("case_sound", "transfer_status", "transferring")
 

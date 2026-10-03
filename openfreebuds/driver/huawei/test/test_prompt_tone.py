@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -16,38 +17,71 @@ from openfreebuds.driver.huawei.constants import (
     CMD_PROMPT_TONE_OTA_START,
 )
 from openfreebuds.driver.huawei.driver.debug import FbDriverHuaweiGenericFixture
-from openfreebuds.driver.huawei.handler import prompt_tone
 from openfreebuds.driver.huawei.handler.prompt_tone import (
     PROMPT_TONE_SUCCESS,
-    HuaweiPromptToneResourceCache,
     OfbHuaweiPromptToneHandler,
-    PromptToneResourceError,
     build_prompt_tone_package,
 )
 from openfreebuds.driver.huawei.package import HuaweiSppPackage
+from openfreebuds.driver.huawei import prompt_tone_resource
+from openfreebuds.driver.huawei.prompt_tone_resource import (
+    HuaweiPromptToneResourceCache,
+    PromptToneResourceError,
+)
 
 
-class _FakeResponse:
-    """Minimal stand-in for the urlopen context manager."""
+class _FakeContent:
+    """Minimal stand-in for aiohttp's response content stream."""
 
     def __init__(self, payload: bytes):
         self._payload = payload
 
-    def __enter__(self):
+    async def iter_chunked(self, size: int):
+        while self._payload:
+            chunk, self._payload = self._payload[:size], self._payload[size:]
+            yield chunk
+
+
+class _FakeResponse:
+    """Minimal stand-in for the aiohttp response context manager."""
+
+    def __init__(self, payload: bytes):
+        self.content = _FakeContent(payload)
+
+    def raise_for_status(self):
+        return None
+
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, *exc_info):
+    async def __aexit__(self, *exc_info):
         return False
 
-    def read(self, size: int = -1) -> bytes:
-        chunk, self._payload = self._payload[:size], self._payload[size:]
-        return chunk
+
+class _FakeSession:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def get(self, url, **kwargs):
+        return _FakeResponse(self._payload)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+def _patch_download(monkeypatch, payload: bytes):
+    """Point the cache at a fake aiohttp session serving `payload`."""
+    monkeypatch.setattr(
+        prompt_tone_resource.aiohttp, "ClientSession",
+        lambda *a, **kw: _FakeSession(payload),
+    )
 
 
 def test_huawei_package_uses_single_byte_tlv_lengths():
-    # Huawei's SPP protocol encodes a TLV length as one plain byte. An extended
-    # multi-byte scheme would re-interpret any existing parameter of 128 bytes
-    # or more, breaking already supported devices, so lengths stay single-byte.
+    # 130 bytes doesn't fit in the length byte
     value = bytes(range(130))
     raw = HuaweiSppPackage(CMD_PROMPT_TONE_OTA_DATA, [(9, value)]).to_bytes()
     assert b"\x09\x82" + value in raw
@@ -116,7 +150,7 @@ async def test_prompt_tone_can_transfer_ota_tone(tmp_path: Path):
     packet_size = 160
 
     class FakeCache:
-        def ensure_pcm(self, tone):
+        async def ensure_pcm(self, tone):
             return pcm_path
 
     ability_rq = HuaweiSppPackage(
@@ -206,45 +240,51 @@ async def test_prompt_tone_can_transfer_ota_tone(tmp_path: Path):
     assert ("send", first_data_rq) in driver.package_log
 
 
-def test_prompt_tone_cache_rejects_archive_with_wrong_digest(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_prompt_tone_cache_rejects_archive_with_wrong_digest(tmp_path, monkeypatch):
     payload = b"definitely not the huawei archive"
-    monkeypatch.setattr(prompt_tone, "PROMPT_TONE_CONFIG_SHA256", hashlib.sha256(payload).hexdigest())
-    monkeypatch.setattr(prompt_tone, "PROMPT_TONE_ARCHIVE_SHA256", "00" * 32)
-    monkeypatch.setattr(prompt_tone, "urlopen", lambda *a, **kw: _FakeResponse(payload))
+    monkeypatch.setattr(prompt_tone_resource, "PROMPT_TONE_CONFIG_SHA256", hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(prompt_tone_resource, "PROMPT_TONE_ARCHIVE_SHA256", "00" * 32)
+    _patch_download(monkeypatch, payload)
 
     cache = HuaweiPromptToneResourceCache(tmp_path)
     with pytest.raises(PromptToneResourceError):
-        cache.prepare()
+        await cache.prepare()
 
-    # Fails closed: nothing unverified is left behind for extraction.
     assert not cache.archive_zip_path.is_file()
     assert list(tmp_path.rglob("*.tmp")) == []
 
 
-def test_prompt_tone_cache_refuses_oversized_download(tmp_path, monkeypatch):
-    monkeypatch.setattr(prompt_tone, "PROMPT_TONE_MAX_DOWNLOAD_SIZE", 16)
-    monkeypatch.setattr(prompt_tone, "urlopen", lambda *a, **kw: _FakeResponse(b"x" * 1024))
+@pytest.mark.asyncio
+async def test_prompt_tone_cache_refuses_oversized_download(tmp_path, monkeypatch):
+    monkeypatch.setattr(prompt_tone_resource, "PROMPT_TONE_MAX_DOWNLOAD_SIZE", 16)
+    _patch_download(monkeypatch, b"x" * 1024)
 
     cache = HuaweiPromptToneResourceCache(tmp_path)
     with pytest.raises(PromptToneResourceError):
-        cache.prepare()
+        await cache.prepare()
 
     assert not cache.config_zip_path.is_file()
 
 
-def test_prompt_tone_cache_replaces_corrupted_cached_archive(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_prompt_tone_cache_replaces_corrupted_cached_archive(tmp_path, monkeypatch):
     payload = b"the real archive bytes"
     digest = hashlib.sha256(payload).hexdigest()
-    monkeypatch.setattr(prompt_tone, "PROMPT_TONE_CONFIG_SHA256", digest)
-    monkeypatch.setattr(prompt_tone, "urlopen", lambda *a, **kw: _FakeResponse(payload))
+    _patch_download(monkeypatch, payload)
 
     cache = HuaweiPromptToneResourceCache(tmp_path)
     cache.config_zip_path.parent.mkdir(parents=True, exist_ok=True)
     cache.config_zip_path.write_bytes(b"stale garbage")
 
-    cache._ensure_zip("https://example.invalid/x.zip", cache.config_zip_path, digest)
+    await cache._ensure_zip("https://example.invalid/x.zip", cache.config_zip_path, digest)
 
     assert cache.config_zip_path.read_bytes() == payload
+
+
+def test_prompt_tone_cdn_language_is_not_hardcoded():
+    assert prompt_tone_resource.PROMPT_TONE_CDN_LANGUAGE == os.environ.get("OFB_PROMPT_TONE_LANGUAGE", "ru")
+    assert f"/{prompt_tone_resource.PROMPT_TONE_CDN_LANGUAGE}/" in prompt_tone_resource.PROMPT_TONE_CDN_ROOT
 
 
 @pytest.mark.asyncio

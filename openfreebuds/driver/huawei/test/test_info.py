@@ -60,4 +60,69 @@ async def test_pro_5_device_info_response_is_decoded_for_about_page():
     assert info["right_serial_number"] == "XC88332616005030"
     assert info["device_submodel"] == "07"
     assert info["device_mac"] == "d0:7e:01:5b:45:d1"
-    assert info["bluetooth_address"] == "c0:da:5e:75:c1:08"
+    assert info["bluetooth_address"] == "c0:da:5e:75:c1:08"
+
+
+@pytest.mark.asyncio
+async def test_device_info_never_surfaces_a_phone_number():
+    driver = OfbDriverHuaweiGeneric("c0:da:5e:75:c1:08")
+    handler = OfbHuaweiInfoHandler()
+    handler.driver = driver
+
+    await handler.on_package(HuaweiSppPackage(CMD_DEVICE_INFO, [
+        (4, b"+34600123456"),
+        (15, b"BTFT0023"),
+    ]))
+
+    info = await driver.get_property("info", None)
+
+    assert "device_phone_number" not in info
+    assert "field_4" not in info
+    assert "34600123456" not in str(info)
+
+
+@pytest.mark.asyncio
+async def test_device_info_reports_honor_as_its_own_manufacturer():
+    driver = OfbDriverHuaweiGeneric("c0:da:5e:75:c1:08")
+    handler = OfbHuaweiInfoHandler()
+    handler.driver = driver
+
+    await handler.on_package(HuaweiSppPackage(CMD_DEVICE_INFO, [
+        (12, b"HONOR Earbuds 2"),
+        (15, b"BTFT0023"),
+    ]))
+
+    info = await driver.get_property("info", None)
+
+    assert info["manufacturer"] == "Honor"
+
+
+@pytest.mark.asyncio
+async def test_device_info_keeps_huawei_manufacturer_when_device_reports_it():
+    driver = OfbDriverHuaweiGeneric("c0:da:5e:75:c1:08")
+    handler = OfbHuaweiInfoHandler()
+    handler.driver = driver
+
+    await handler.on_package(HuaweiSppPackage(CMD_DEVICE_INFO, [
+        (12, b"HUAWEI FreeBuds Pro"),
+        (15, b"BTFT0023"),
+    ]))
+
+    info = await driver.get_property("info", None)
+
+    assert info["manufacturer"] == "Huawei"
+
+
+@pytest.mark.asyncio
+async def test_device_info_manufacturer_falls_back_when_name_is_unknown():
+    driver = OfbDriverHuaweiGeneric("c0:da:5e:75:c1:08")
+    handler = OfbHuaweiInfoHandler()
+    handler.driver = driver
+
+    await handler.on_package(HuaweiSppPackage(CMD_DEVICE_INFO, [
+        (15, b"BTFT0023"),
+    ]))
+
+    info = await driver.get_property("info", None)
+
+    assert info["manufacturer"] == "Huawei"

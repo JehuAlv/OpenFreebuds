@@ -14,11 +14,11 @@ class OfbHuaweiInfoHandler(OfbDriverHandlerHuawei):
     handler_id = "device_info"
     commands = [CMD_DEVICE_INFO]
 
+    # Key 4 is a phone number on some firmware, filtered as internal
     descriptor = {
         1: "bt_version",
         2: "product_id",
         3: "hardware_ver",
-        4: "device_phone_number",
         5: "device_bt_mac",
         6: "device_imei",
         7: "software_ver",
@@ -33,7 +33,7 @@ class OfbHuaweiInfoHandler(OfbDriverHandlerHuawei):
         32: "bluetooth_address",
     }
 
-    internal_fields = {28, 29, 30, 33}
+    internal_fields = {4, 28, 29, 30, 33}
 
     field_order = [
         "manufacturer",
@@ -56,6 +56,13 @@ class OfbHuaweiInfoHandler(OfbDriverHandlerHuawei):
         "BTFT0023": "T0023/T0023C",
     }
 
+    # HONOR is not Huawei, take vendor from the reported name
+    manufacturer_prefixes = {
+        "HONOR": "Honor",
+        "HUAWEI": "Huawei",
+    }
+    manufacturer_default = "Huawei"
+
     async def on_init(self):
         # Try to fetch so much props as we can
         resp = await self.driver.send_package(
@@ -64,7 +71,7 @@ class OfbHuaweiInfoHandler(OfbDriverHandlerHuawei):
         await self.on_package(resp)
 
     async def on_package(self, package: HuaweiSppPackage):
-        out = {"manufacturer": "Huawei"}
+        out = {}
         for key in package.parameters:
             if key in self.internal_fields:
                 continue
@@ -85,7 +92,16 @@ class OfbHuaweiInfoHandler(OfbDriverHandlerHuawei):
         if model_id in self.model_aliases:
             out["model"] = self.model_aliases[model_id]
 
+        out["manufacturer"] = self._detect_manufacturer(out)
         await self.driver.put_property("info", None, _order_fields(out, self.field_order))
+
+    def _detect_manufacturer(self, info: dict) -> str:
+        for key in ("device_name", "device_model_full", "device_submodel"):
+            prefix = str(info.get(key, "")).split(" ", 1)[0].upper()
+            if prefix in self.manufacturer_prefixes:
+                return self.manufacturer_prefixes[prefix]
+
+        return self.manufacturer_default
 
 
 def _parse_per_earphone_sn(out, data: str):

@@ -3,7 +3,7 @@ import json
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QSlider, QMenu, QInputDialog,
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QGroupBox, QSlider, QMenu, QInputDialog,
                              QMessageBox, QFileDialog, QVBoxLayout, QWidget)
 from qasync import asyncSlot
 
@@ -63,7 +63,6 @@ class OfbQtSoundQualityModule(Ui_OfbQtSoundQualityModule, OfbQtCommonModule):
         self.sound_option_handlers = []
 
         self.setupUi(self)
-        self.label_4.setProperty("pageLead", True)
         self._setup_sound_toggles()
 
         self.undo_btn.setIcon(
@@ -80,7 +79,7 @@ class OfbQtSoundQualityModule(Ui_OfbQtSoundQualityModule, OfbQtCommonModule):
                 self.custom_menu.addAction(name).triggered.connect(action)
 
         for i in range(10):
-            self._add_slider(i)
+            self._connect_eq_slider(i)
         self.custom_eq.setVisible(False)
 
     def _setup_sound_toggles(self):
@@ -153,27 +152,20 @@ class OfbQtSoundQualityModule(Ui_OfbQtSoundQualityModule, OfbQtCommonModule):
 
         return _handler
 
-    def _add_slider(self, i):
+    def _connect_eq_slider(self, i):
         lock = asyncio.Lock()
+        self._eq_rows.append(getattr(self, f"eq_row_{i}"))
 
         @asyncSlot(int)
-        async def _on_change(value: int):
-            if lock.locked():
+        async def _on_change(value: int, index: int = i, guard: asyncio.Lock = lock):
+            if guard.locked():
                 return
-            async with lock:
-                self._last_preset_data[i] = value
+            async with guard:
+                self._last_preset_data[index] = value
                 await self.ofb.set_property("sound", "equalizer_rows",
                                             json.dumps(self._last_preset_data))
 
-        slider = QSlider(Qt.Orientation.Vertical, self.custom_eq_rows)
-        slider.setRange(-60, 60)
-        slider.setTickPosition(QSlider.TickPosition.TicksBothSides)
-        slider.setTickInterval(5)
-        slider.setToolTip("0")
-        # noinspection PyUnresolvedReferences
-        slider.valueChanged.connect(_on_change)
-        self.custom_eq_rows_layout.addWidget(slider)
-        self._eq_rows.append(slider)
+        self._eq_rows[i].valueChanged.connect(_on_change)
 
     async def update_ui(self, event: OfbCoreEvent):
         sound = await self.ofb.get_property("sound")

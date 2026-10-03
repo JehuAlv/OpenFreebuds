@@ -32,4 +32,5 @@ class OfbHuaweiBatteryHandler(OfbDriverHandlerHuawei):
         if 3 in package.parameters and len(package.parameters[3]) > 0:
             out["is_charging"] = json.dumps(b"\x01" in package.parameters[3])
         if out:
+            # Different commands report different subsets, don't drop known levels
             await self.driver.put_property("battery", None, out, extend_group=True)

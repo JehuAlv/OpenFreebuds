@@ -80,17 +80,8 @@ class OfbQtGesturesModule(Ui_OfbQtGesturesModule, OfbQtCommonModule):
         self._ui_rows: list[_UiRow] = []
 
         self.setupUi(self)
-        self.label.setProperty("pageLead", True)
         self.label_2.setProperty("settingsMiniHeader", True)
         self.label_3.setProperty("settingsMiniHeader", True)
-        self.light_long_label = QLabel(self.tr("Pinch and hold"), self)
-        self.light_long_left = QComboBox(self)
-        self.light_long_left.setObjectName("light_long_left")
-        self.light_long_right = QComboBox(self)
-        self.light_long_right.setObjectName("light_long_right")
-        self.gridLayout.addWidget(self.light_long_label, 6, 0, 1, 1)
-        self.gridLayout.addWidget(self.light_long_left, 6, 1, 1, 1)
-        self.gridLayout.addWidget(self.light_long_right, 6, 2, 1, 1)
         self._add_shared_gesture_row("light_tap_call_once", self.tr("Pinch once in call"), 12)
         self._add_shared_gesture_row("light_tap_call_twice", self.tr("Pinch twice in call"), 13)
         self._add_shared_gesture_row("light_tap_once", self.tr("Pinch once"), 14)

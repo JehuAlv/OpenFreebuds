@@ -1,12 +1,12 @@
 import json
 
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QGridLayout, QGroupBox, QVBoxLayout
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QGroupBox, QVBoxLayout
 from qasync import asyncSlot
 
 from openfreebuds import OfbEventKind
 from openfreebuds_qt.utils.core_event import OfbCoreEvent
 from openfreebuds_qt.app.module.common import OfbQtCommonModule
-from openfreebuds_qt.app.widget import clear_layout, make_settings_row, populate_rows
+from openfreebuds_qt.app.widget import make_settings_row
 from openfreebuds_qt.qt_i18n import (
     get_device_adaptive_audio_names,
     get_device_config_option_names,
@@ -37,46 +37,9 @@ class OfbQtDeviceOtherSettingsModule(Ui_OfbQtDeviceOtherSettingsModule, OfbQtCom
         self.config_option_names = get_device_config_option_names()
 
         self.setupUi(self)
-        self._rebuild_static_sections()
         self._setup_adaptive_audio_switches()
         self._setup_feature_switches()
         self._setup_config_options()
-
-    def _rebuild_static_sections(self):
-        auto_pause_title = self.auto_pause_toggle.text()
-        auto_pause_description = self.label.text()
-        self.auto_pause_toggle.setText("")
-        self._replace_group_layout(
-            self.auto_pause_root.layout(),
-            [make_settings_row(self.auto_pause_root, auto_pause_title, auto_pause_description, [self.auto_pause_toggle])],
-            [self.auto_pause_toggle],
-        )
-
-        low_latency_title = self.low_latency_toggle.text()
-        low_latency_description = self.label_3.text()
-        self.low_latency_toggle.setText("")
-        self._replace_group_layout(
-            self.low_latency_root.layout(),
-            [make_settings_row(self.low_latency_root, low_latency_title, low_latency_description, [self.low_latency_toggle])],
-            [self.low_latency_toggle],
-        )
-
-        self._replace_group_layout(
-            self.service_language_root.layout(),
-            [make_settings_row(
-                self.service_language_root,
-                self.label_2.text().rstrip(":"),
-                self.label_4.text(),
-                [self.service_language_box],
-            )],
-            [self.service_language_box],
-            2,
-        )
-
-    @staticmethod
-    def _replace_group_layout(layout, rows, keep_widgets, grid_column_span: int = 1):
-        clear_layout(layout, keep_widgets=keep_widgets)
-        populate_rows(layout, rows, grid_column_span if isinstance(layout, QGridLayout) else 1)
 
     def _setup_adaptive_audio_switches(self):
         self.adaptive_audio_root = QGroupBox(self.tr("Adaptive audio"), self)
